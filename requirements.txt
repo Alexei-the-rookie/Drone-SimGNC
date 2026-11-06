@@ -1,0 +1,6 @@
+# 只有 analytic 后端必需；gz 后端的 python 绑定来自 Gazebo / ROS，不走 pip
+numpy>=1.24
+PyYAML>=6.0
+
+# 可选：--plot 出图
+# matplotlib>=3.6

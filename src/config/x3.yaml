@@ -1,0 +1,32 @@
+# X3 quadrotor, as shipped with Gazebo Harmonic
+# (https://fuel.gazebosim.org/1.0/OpenRobotics/models/X3%20UAV, CC-BY 4.0)
+#
+# Values below are read straight from the SDF:
+#   model.sdf                              -> body_mass, body_inertia, rotor poses/masses
+#   worlds/quadcopter.sdf (motor plugins)  -> kf, km_ratio, omega_max, tau_up/down
+#
+# NOTE on units: kf is N / (rad/s)^2 here.  Some other simulators (e.g.
+# gym-pybullet-drones) use N / rpm^2; the two differ by ~300x.  Do not mix.
+
+name: x3
+body_mass: 1.5          # kg
+rotor_mass: 0.005       # kg, each of the 4 rotor links
+body_inertia: [0.0347563, 0.07, 0.0977]
+
+kf: 8.54858e-06         # motorConstant
+km_ratio: 0.016         # momentConstant = kM / kF
+omega_max: 800.0        # maxRotVelocity, rad/s
+tau_up: 0.0125          # timeConstantUp, s
+tau_down: 0.025         # timeConstantDown, s
+
+# Linear drag is NOT modelled by gz's MulticopterMotorModel, so keep it at 0 to
+# stay honest against the simulator.
+drag: 0.0
+
+# rotor_0..3, body frame, x forward / y left / z up.
+# spin +1 = CCW seen from above.  (0,1) and (2,3) are the diagonal pairs.
+rotors:
+  - {x:  0.13, y: -0.22, z: 0.023, spin:  1}
+  - {x: -0.13, y:  0.20, z: 0.023, spin:  1}
+  - {x:  0.13, y:  0.22, z: 0.023, spin: -1}
+  - {x: -0.13, y: -0.20, z: 0.023, spin: -1}
