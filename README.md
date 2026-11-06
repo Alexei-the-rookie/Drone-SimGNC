@@ -1,8 +1,9 @@
-# quadfc
+# Drone-SimGNC
 
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](./LICENSE)
 
 手搓四旋翼飞控的**骨架**：把「控制器 / 被控对象 / 仿真环境」三层拆开，控制律留空由你填。
+（Python 包名是 `quadfc`，即 `python3 -m quadfc`。）
 
 内置两个可互换的被控对象：
 
