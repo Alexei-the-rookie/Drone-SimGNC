@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from quadfc.control import Controller, HoverController
+from quadfc.control.rate_alt import RateAltController
 from quadfc.params import QuadParams
 from quadfc.plant.analytic import AnalyticPlant
 from quadfc.plant.base import Plant
@@ -24,6 +25,8 @@ DEFAULT_WORLD = PKG_ROOT / "worlds" / "x3_quadcopter.sdf"
 def build_controller(name: str, params: QuadParams, args) -> Controller:
     if name == "hover":
         return HoverController(params, scale=args.hover_scale)
+    if name == "rate_alt":
+        return RateAltController(params)
     raise SystemExit(f"unknown controller '{name}'")
 
 
@@ -79,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--backend", choices=["analytic", "gz"], default="analytic")
-    p.add_argument("--controller", default="hover", choices=["hover"])
+    p.add_argument("--controller", default="hover", choices=["hover", "rate_alt"])
     p.add_argument("--params", type=Path, default=DEFAULT_PARAMS)
     p.add_argument("--world", type=Path, default=DEFAULT_WORLD)
     p.add_argument("--duration", type=float, default=5.0)
