@@ -24,7 +24,7 @@ class RateAltController(Controller):
         self.int_rate = np.zeros(3)
 
         # altitude_loop expected_acc to lift_force
-        self.kp_z, self.ki_z, self.kd_z = 1.0, 0.0, 0.0
+        self.kp_z, self.ki_z, self.kd_z = 2.5, 0.0, 3.2
         self.int_z = 0.0
         self.z_des = None
         self.w_des = np.zeros(3)
@@ -67,4 +67,5 @@ class RateAltController(Controller):
                 lam = min(lam, mean / (-diff_i))
         return mean + lam * diff
 
-class PositionController(Controller):
+
+#class PositionController(Controller):
