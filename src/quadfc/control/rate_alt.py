@@ -19,7 +19,7 @@ class RateAltController(Controller):
 
         # omega_loop define Kp = Inertia * wc
         I = np.diag(params.inertia)
-        self.kp_rate = np.array([1.0, 1.0, 1.0])
+        self.kp_rate = np.array([0.71,1.41, 0.5])
         self.ki_rate = np.array([0.0, 0.0, 0.0])
         self.int_rate = np.zeros(3)
 
@@ -66,3 +66,5 @@ class RateAltController(Controller):
             elif diff_i < -1e-9:
                 lam = min(lam, mean / (-diff_i))
         return mean + lam * diff
+
+class PositionController(Controller):
