@@ -43,7 +43,7 @@ def simulate(params, z0, ref, duration, rate, kp, kd):
         ctrl.z_des = float(ref(s.t))  # update reference
         u = np.asarray(ctrl.step(s, dt), dtype=float)  # compute control input
         c = np.clip(u, 0.0, params.omega_max)  # clip to max/min
-        sat[i] = bool(np.any(np.abs(u - c) > 1e-7))  # check if saturated
+        sat[i] = ctrl.saturated  # set inside step(), before the internal _scale
 
         t[i], z[i], vz[i] = s.t, s.position[2], s.velocity[2]
         thrust[i] = params.allocation[0] @ (c ** 2)  # compute thrust from motor speeds

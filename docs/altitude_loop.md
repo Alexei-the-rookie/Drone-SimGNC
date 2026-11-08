@@ -3,7 +3,8 @@
 > 代码：[`../src/quadfc/control/rate_alt.py`](../src/quadfc/control/rate_alt.py)
 > 被控对象：[`../src/quadfc/plant/analytic.py`](../src/quadfc/plant/analytic.py)
 > 参数：[`../src/config/x3.yaml`](../src/config/x3.yaml)
-> 测试工具：[`../src/tools/test/step_sine_rate_alt.py`](../src/tools/test/step_sine_rate_alt.py)
+> 测试工具：[`../src/tools/test/step_sine_rate_alt.py`](../src/tools/test/step_sine_rate_alt.py)（高度环）、
+> [`../src/tools/test/step_sine_rate.py`](../src/tools/test/step_sine_rate.py)（角速度环）
 
 ---
 
@@ -18,7 +19,8 @@
 | 混控 `B⁻¹` + 推力饱和缩放 | 轨迹前馈、倾角补偿 |
 | — | 电机动力学（属于 plant） |
 
-因此它只能验证「升到指定高度并停住」和「角速度接近零」，**不能验证航点跟踪或姿态保持**（见 §7）。
+因此它只能验证「升到指定高度并停住」和「角速度跟踪 `w_des`」（内环，§6.6），
+**不能验证航点跟踪或姿态保持**（见 §7-3）。
 
 ---
 
@@ -115,7 +117,9 @@ if w2.max() > w2_max or w2.min() < 0.0:
 return np.sqrt(np.clip(w2, 0.0, self.w2_max))
 ```
 
-> ⚠️ [`base.py`](../src/quadfc/control/base.py) 的契约是「控制器不要裁到 `[0, omega_max]`，交给 mixer，这样 runner 才能统计饱和」。本控制器在内部完成了全部限幅，**导致 runner / 测试工具的饱和率恒为 0**。修法见 §7-1。
+> ⚠️ [`base.py`](../src/quadfc/control/base.py) 的契约是「控制器不要裁到 `[0, omega_max]`，交给 mixer，这样 runner 才能统计饱和」。本控制器在内部完成了全部限幅，
+> 所以额外记录了一个 `self.saturated`（在 `_scale` **之前**取），供 runner / 测试工具读取。
+> 注意 `runner.py` 的饱和统计仍用「`cmd` 与 `clip(cmd)` 之差」，对这条路径**恒为 0**；要做饱和统计请读 `controller.saturated`。
 
 ---
 
@@ -282,7 +286,9 @@ python3 tools/test/step_sine_rate_alt.py --mode step --step 3 --hold 12 --kp 2.5
 | 8 m | ≈0.80 s | 明显的推力受限段 |
 | ≥12 m | 正向 + 反向 | 刹车段减速度超过 −9.81 m/s²，**开始超调** |
 
-`saturated = 0%` 时如何确认真的饱和了：看 CSV 的 `thrust` 列是否在 21.884 N 上停留约 19 个采样点（0.19 s @ 100 Hz）。
+`saturated` 一列现在直接读控制器的 `self.saturated`（2026-11 修好，见 §7-1），
+实测 3 m 1.67%、6 m 5.00%，与上表估算一致。若要看饱和的**物理后果**（推力被钉在 21.884 N），
+仍可查 CSV 的 `thrust` 列：
 
 ```python
 import numpy as np
@@ -291,16 +297,108 @@ m = np.isclose(a["thrust"], 21.884, atol=1e-3)
 print(m.sum(), a["t"][m].min(), a["t"][m].max())
 ```
 
-### 6.6 角速度环测试（待做）
+### 6.6 角速度环测试
 
-`w_des` 恒零，内环从未被激励。隔离方法：把高度增益置 0（此时 `F ≡ mg`），每个周期写
+工具：[`../src/tools/test/step_sine_rate.py`](../src/tools/test/step_sine_rate.py)
 
-```python
-ctrl.w_des = np.array([A_w * np.sin(2*np.pi*f*s.t), 0.0, 0.0])
-ctrl.kp_z = ctrl.ki_z = ctrl.kd_z = 0.0
+```bash
+cd src
+python3 tools/test/step_sine_rate.py --mode both --plot
 ```
 
-扫 `f = 1…10 Hz`、`A_w = 0.1 rad/s`，拟合 `state.omega[0]`。预期带宽 ≈ `kp_rate/I`：`0.71 / 0.0356 ≈ 20 rad/s ≈ 3.2 Hz`。注意 100 Hz 控制频率在 10 Hz 已接近离散化误差明显区。
+`w_des` 平时恒零，内环从未被激励。隔离方法：把高度增益置 0（此时 `F ≡ m·g`，
+混控线性化点固定），每个周期写 `ctrl.w_des[axis] = ref(t)`。**不改控制器源码**，与 §6.1 同一手法。
+
+```python
+ctrl.kp_z = ctrl.ki_z = ctrl.kd_z = 0.0
+ctrl.w_des[:] = 0.0
+ctrl.w_des[axis] = ref(t)
+```
+
+> 副作用：高度环关掉后没有 `cos(tilt)` 补偿，倾斜时垂直推力下降，飞机会缓慢下沉。
+> 对 `omega` 的测量没有影响（analytic 后端没有地面），但别拿这一组的 `z` 当参考。
+
+#### ⚠️ 一阶近似不够用：电机滞后决定了 ωn 和 ζ
+
+`τ_cmd →(1/g)→ ω_cmd →1/(1+τ_m s)→ ω →g→ τ →1/(I s)→ ω`，混控增益 `g` 在环路两头抵消，剩下
+
+```
+H(s) = kp / (I·τ_m·s² + I·s + kp)
+ωn   = √(kp / (I·τ_m))            ζ = ½·√(I / (kp·τ_m))
+```
+
+所以「带宽 = kp/I」只在忽略电机滞后时成立。`kp/I = 20 rad/s` 的升滚道被电机滞后抬到
+`ωn ≈ 40 rad/s`，同时 ζ 落到 1.0——**看起来像带宽翻倍，其实是二阶系统换了形状**。
+
+| 轴 | I [kg·m²] | `kp_rate` | `kp/I` [rad/s] | ωn [rad/s] | ζ |
+|---|---|---|---|---|---|
+| roll | 0.0357 | 0.71 | 19.9 | 39.9 | 1.00 |
+| pitch | 0.0703 | 1.41 | 20.0 | 40.0 | 1.00 |
+| yaw | 0.0989 | 0.50 | 5.1 | 20.1 | 1.99 |
+
+（ωn/ζ 用 `τ_up = 0.0125 s`；`τ_down = 0.025 s` 时 ωn 更低、ζ 略高，见下表括号。）
+
+#### 实测（analytic、100 Hz、A = 0.02 rad/s、2026-11）
+
+**阶跃 0 → 0.1 rad/s**
+
+| 轴 | rise 10–90 | 超调 | settle 2% | 稳态误差 | τ_peak | sat | 理论 (ζ) |
+|---|---|---|---|---|---|---|---|
+| roll | 0.070 s | 3.68 % | 0.190 s | 0.0000 rad/s | 0.071 N·m | 0 % | ζ=1.00 |
+| pitch | 0.070 s | 3.77 % | 0.190 s | 0.0000 rad/s | 0.141 N·m | 0 % | ζ=1.00 |
+| yaw | 0.380 s | 0 % | 0.700 s | −0.0007 rad/s | 0.050 N·m | 0 % | ζ=1.99 |
+
+roll/pitch 出现 3.7% 超调，而 `ζ = 1.00` 理论上不该有超调：这一环是**不对称**的
+（加速用 `τ_up = 12.5 ms`，刹车用 `τ_down = 25 ms`），减速段比加速段慢，回落后会小幅冲过。
+
+**扫频（100 Hz 控制）**
+
+| f [Hz] | roll 增益 / 滞后 | pitch 增益 / 滞后 | yaw 增益 / 滞后 |
+|---|---|---|---|
+| 0.2 | 1.000 / 3.6° | 1.000 / 3.6° | 0.977 / 14.1° |
+| 0.5 | 0.999 / 9.1° | 0.999 / 9.0° | 0.879 / 33.1° |
+| 1.0 | 0.996 / 18.3° | 0.997 / 18.2° | 0.674 / 56.7° |
+| 2.0 | 0.977 / 37.5° | 0.978 / 37.3° | 0.405 / 83.9° |
+| 4.0 | 0.819 / 78.0° | 0.823 / 77.7° | 0.197 / 112.3° |
+| 6.0 | 0.562 / 111.9° | 0.567 / 111.7° | 0.117 / 130.5° |
+| 8.0 | 0.366 / 135.1° | 0.369 / 135.0° | 0.077 / 144.2° |
+
+| 轴 | 实测 −3 dB | 理论 τ_up / τ_mean / τ_down |
+|---|---|---|
+| roll | 4.773 Hz | 4.064 / 4.342 / 4.422 Hz |
+| pitch | 4.807 Hz | 4.093 / 4.370 / 4.447 Hz |
+| yaw | 0.908 Hz | 0.852 / 0.881 / 0.911 Hz |
+
+**100 Hz 的离散化误差是可以量出来的**。同一组频率改到 `--rate 1000`：
+
+| f [Hz] | 100 Hz 增益 / 滞后 | 1000 Hz 增益 / 滞后 | 差值 |
+|---|---|---|---|
+| 0.5 | 0.999 / 9.1° | 0.997 / 9.1° | 0.002 / 0.0° |
+| 2.0 | 0.977 / 37.5° | 0.945 / 36.7° | 0.032 / 0.8° |
+| 4.0 | 0.819 / 78.0° | 0.753 / 72.7° | 0.066 / 5.3° |
+| 8.0 | 0.366 / 135.1° | 0.348 / 119.2° | 0.018 / 15.9° |
+
+`--rate 1000` 下 −3 dB 为 **4.331 Hz**，与 `τ_mean` 二阶模型 4.342 Hz 差 0.3%，
+`f ≤ 40 Hz` 内增益最大偏差 0.002、滞后 0.6°——**实现正确**。
+
+100 Hz 下的偏差就是零阶保持造成的半个采样周期延迟（`T/2 = 5 ms`）：
+8 Hz 处 5 ms 对应 `8×360×0.005 = 14.4°`，与实测 15.9° 吻合。滞后吃掉相位裕度，
+闭环在 4 Hz 附近反而**更峰**（0.819 > 0.753），所以 100 Hz 读出的 4.77 Hz 带宽是偏乐观的。
+要真正把这个内环做到 5 Hz 以上，先把控制频率提到 500 Hz 以上。
+
+#### 力矩权限（从混控矩阵直接算，X3）
+
+| 轴 | 悬停时可用力矩上限 | 说明 |
+|---|---|---|
+| roll / pitch | ≈ 1.46 N·m | 受总推力约束：升速侧到 `ω_max²` 时降速侧还剩 `232144 rad²/s²` |
+| yaw | **≈ 0.112 N·m** | 反扭矩差，比 roll 小一个数量级 |
+
+实测核对：`--step 5` 的 roll 阶跃 `τ_peak = 1.4644 N·m`（= 上表上限），饱和 9%；
+`--axis yaw --step 0.3` 的 `τ_peak = 0.1067 N·m`，饱和 10%。
+
+推论：**yaw 的转速指令有硬上限** `ω_des,max ≈ 0.112 / kp_rate[yaw]`。
+当前 `kp = 0.5` → 0.22 rad/s；若按 §7-4 把 `kp` 改成 `I·ωc = 1.98`，上限只剩 **0.057 rad/s**。
+yaw 想要带宽就得牺牲转速权限，两者不能同时要。
 
 ### 6.7 Gazebo 交叉验证
 
@@ -330,17 +428,17 @@ def test_bode_matches_second_order(params):
 
 | # | 问题 | 影响 | 建议 |
 |---|---|---|---|
-| 1 | 控制器内部完成 `_scale` + `clip`，破坏了 `base.py` 的约定 | runner / 工具的饱和率**恒为 0**，无法用于调增益 | 在 `step()` 里记录 `self.saturated`（见下） |
+| 1 | ~~控制器内部完成 `_scale` + `clip`，破坏了 `base.py` 的约定~~ | 已修：`step()` 记录 `self.saturated`（在 `_scale` 之前），两个测试工具改读该标志 | — |
 | 2 | `reset()` 覆盖 `z_des` 为当前高度 | CLI 只能「原地悬停」，无法指定目标 | `__init__(..., z_des=None)`，`reset` 仅在未指定时取当前高度 |
-| 3 | `w_des` 恒为 0 | 零角速度 ≠ 水平；有初始倾角会一直斜着飘 | 增加姿态外环（角度 → `w_des`） |
-| 4 | `kp_rate` 写死，`I = np.diag(params.inertia)` 未使用 | 换机型即失效 | `self.kp_rate = np.diag(params.inertia) * wc` |
+| 3 | `w_des` 恒为 0 | 零角速度 ≠ 水平；有初始倾角会一直斜着飘 | 增加姿态外环（角度 → `w_des`）；内环本身已在 §6.6 标定 |
+| 4 | `kp_rate` 写死，`I = np.diag(params.inertia)` 未使用 | 换机型即失效；且三轴 `kp/I` 不相等（yaw 只有 5.1 rad/s，见 §6.6） | `self.kp_rate = np.diag(params.inertia) * wc`；注意 yaw 权限只有 0.112 N·m |
 | 5 | `ki_z` 可开但无抗饱和 | 饱和期间积分累积，恢复后过冲 | 条件积分或 back-calculation，可复用 `self.saturated` |
 | 6 | 无 `z̈_des` 前馈 | 正弦/轨迹跟踪存在相位滞后（0.16 Hz 已 65°） | `acc_z += z_des_ddot` |
 | 7 | 默认 `kd_z = 0.1` | ζ = 0.05，Q ≈ 10，仅勉强稳定 | 改为 §4.4 推荐值 |
 | 8 | 推力沿机体 z 轴，无倾角补偿 | 大倾角时高度环失效、产生横向漂移 | 用 `quat` 把期望推力分解到机体系 |
 | 9 | `_scale` 全超限时退化为恒最大推力 | 同时丢失力矩权限 | 记录并在上层限制期望加速度 |
 
-问题 1 的最小修法：
+问题 1 的修法（已落到代码）：
 
 ```python
 w2 = self.B_inv @ np.array([F, *tau])
@@ -349,7 +447,9 @@ if self.saturated:
     w2 = self._scale(w2)
 ```
 
-工具里改用 `sat[i] = ctrl.saturated`（必须在 `step()` **之后**读）。
+工具里读 `sat[i] = ctrl.saturated`（必须在 `step()` **之后**读）。
+修好之后 §6.5 的估算可以被直接验证：3 m 阶跃 → 1.67%（12.5 s × 1.67% ≈ 0.21 s，估 0.19 s），
+6 m 阶跃 → 5.00%（≈0.63 s，估 0.58 s）。
 
 ---
 
@@ -371,6 +471,17 @@ python3 tools/test/step_sine_rate_alt.py --mode step --step 6 --hold 12 \
 
 # 低频增益校验（验 DC 增益 ≈ 1）
 python3 tools/test/step_sine_rate_alt.py --mode sine --freqs 0.01,0.05,0.10
+
+# 角速度环：三轴阶跃 + 扫频
+python3 tools/test/step_sine_rate.py --mode both --plot
+
+# 角速度环：排除 100 Hz 零阶保持的影响
+python3 tools/test/step_sine_rate.py --mode sine --axis roll --rate 1000 \
+    --freqs 0.5,2,4,6,8
+
+# 角速度环：力矩权限边界（yaw ≈0.112 N·m、roll ≈1.46 N·m）
+python3 tools/test/step_sine_rate.py --mode step --axis yaw --step 0.3
+python3 tools/test/step_sine_rate.py --mode step --axis roll --step 5
 
 # Gazebo
 python3 -m quadfc --backend gz --controller rate_alt --altitude 2 --duration 8 --gui
