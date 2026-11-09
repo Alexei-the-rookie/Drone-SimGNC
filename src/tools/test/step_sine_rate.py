@@ -1,15 +1,19 @@
 # Step / Sine Rate Loop Test
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Exercise the inner rate loop of `RateAltController` in isolation.
+"""Exercise the rate loop + mixer in isolation.
 
-The altitude loop is switched off (kp_z = ki_z = kd_z = 0), which pins the
-collective thrust at F = m·g.  The mixer linearisation point is then constant
-and the only thing left in the loop is
+This tool deliberately wires only the two layers it claims to test:
 
-    w_des --> kp_rate --> tau --> motor lag --> I w' = tau --> w
+    w_des --> RateController --> tau --> MixController --> motor speed
 
-so what comes out is the rate loop alone, not a height/attitude mixture.
+The collective thrust is pinned at F = m·g, so the mixer linearisation point is
+constant and the only thing left in the loop is
+
+    w_des --> kp --> tau --> motor lag --> I w' = tau --> w
+
+Using `CascadeController` here would drag the altitude layer into a test that
+has nothing to do with height.
 """
 
 from __future__ import annotations
@@ -23,8 +27,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # .../src
 
-from quadfc.control.rate_alt import RateAltController
-from quadfc.params import QuadParams
+from quadfc.control.mixer import MixerController
+from quadfc.control.rate import RateController
+from quadfc.params import G, QuadParams
 from quadfc.plant.analytic import AnalyticPlant
 
 ROOT = Path(__file__).resolve().parent.parent.parent  # .../src
@@ -44,15 +49,17 @@ class Run:
 
 def simulate(params, z0, axis, ref, duration, rate, kp, ki=0.0):
     plant = AnalyticPlant(params, substep=1e-3, altitude=z0)
-    ctrl = RateAltController(params)
+    rate_ctl = RateController(params)
+    mix = MixerController(params)
 
-    # Isolate the inner loop: F == m*g for the whole run.
-    ctrl.kp_z = ctrl.ki_z = ctrl.kd_z = 0.0
-    ctrl.kp_rate[axis] = kp
-    ctrl.ki_rate[axis] = ki
+    rate_ctl.kp[axis] = kp
+    rate_ctl.ki[axis] = ki
 
     s = plant.reset()
-    ctrl.reset(s)
+    rate_ctl.reset()
+
+    f = params.mass * G          # altitude layer disabled: hover thrust only
+    w_des = np.zeros(3)
 
     dt = 1.0 / rate
     n = int(np.ceil(duration / dt))
@@ -64,14 +71,14 @@ def simulate(params, z0, axis, ref, duration, rate, kp, ki=0.0):
     sat = np.empty(n, dtype=bool)
 
     for i in range(n):
-        ctrl.w_des[:] = 0.0
-        ctrl.w_des[axis] = float(ref(s.t))
-        u = np.asarray(ctrl.step(s, dt), dtype=float)
+        w_des[:] = 0.0
+        w_des[axis] = float(ref(s.t))
+        u = np.asarray(mix.step(f, rate_ctl.step(s.omega, w_des, dt)), dtype=float)
         c = np.clip(u, 0.0, params.omega_max)
-        sat[i] = ctrl.saturated
+        sat[i] = mix.saturated
 
         wrench = params.allocation @ (c**2)
-        t[i], w[i], r[i] = s.t, s.omega[axis], ctrl.w_des[axis]
+        t[i], w[i], r[i] = s.t, s.omega[axis], w_des[axis]
         thrust[i], tau[i] = wrench[0], wrench[1 + axis]
         s = plant.step(c, dt)
 
@@ -164,7 +171,7 @@ def main(argv=None) -> int:
     ap.add_argument("--amplitude", type=float, default=0.02, help="正弦幅值 [rad/s]")
     ap.add_argument("--freqs", default="0.2,0.5,1,1.5,2,3,4,6,8")
     ap.add_argument("--rate", type=float, default=100.0, help="控制频率 [Hz]")
-    ap.add_argument("--kp", type=float, default=None, help="临时覆盖该轴 kp_rate")
+    ap.add_argument("--kp", type=float, default=None, help="临时覆盖该轴 kp")
     ap.add_argument("--csv", type=Path, default=None)
     ap.add_argument("--plot", action="store_true")
     args = ap.parse_args(argv)
@@ -174,8 +181,8 @@ def main(argv=None) -> int:
 
     params = QuadParams.from_yaml(args.params)
     inertia = np.diag(params.inertia)
-    # 默认值从控制器读，免得这里和 rate_alt.py 各写一份而悄悄失配
-    kp = np.atleast_1d(RateAltController(params).kp_rate).astype(float).copy()
+    # 默认值从控制器读，免得这里和 rate.py 各写一份而悄悄失配
+    kp = RateController(params).kp.astype(float).copy()
     names = list(AXES) if args.axis == "all" else [args.axis]
     if args.kp is not None:
         for name in names:
@@ -184,7 +191,7 @@ def main(argv=None) -> int:
 
     print(f"hover_omega = {params.hover_omega:7.1f} rad/s   "
           f"thrust = {params.weight:6.3f} N hover / {thrust_max:6.3f} N max")
-    print("altitude loop OFF (kp_z = ki_z = kd_z = 0) -> F = m*g constant\n")
+    print("altitude layer not used: F = m*g constant\n")
     print(f"  {'axis':>5} {'I [kg m^2]':>10} {'kp':>6} {'kp/I [rad/s]':>13} "
           f"{'wn [rad/s]':>10} {'zeta':>6}")
     for name in names:

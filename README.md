@@ -102,7 +102,7 @@ python3 tools/compare_backends.py --duration 1.2 --altitude 1.0
 | 参数 | 默认 | 作用 |
 |---|---|---|
 | `--backend {analytic,gz}` | `analytic` | 选被控对象 |
-| `--controller NAME` | `hover` | 选控制律（目前只有 `hover`，见下文如何加） |
+| `--controller NAME` | `hover` | 选控制律（`hover` / `cascade`，见下文如何加） |
 | `--duration` | 5.0 | 仿真时长 |
 | `--rate` | 100 | 控制环频率 Hz |
 | `--altitude` | 0 | 起始高度（`gz` 后端会 teleport 到该高度） |
@@ -234,6 +234,30 @@ class CascadePID(Controller):
 - **反解出负的 `ω²` 说明指令不可达**（比如想滚转但已经贴到推力上限）。生产做法是在 QP/混控里做等比例缩放，而不是逐通道 `clip`——逐通道 clip 会破坏力矩方向，出现「想滚转却掉高」。
 - **饱和要能被看见**。返回未裁剪的指令，runner 会统计；一旦 `saturated` 超过几个百分点，先改增益，别急着怪仿真。
 
+### 别把一整套栈塞进一个类
+
+上面那个骨架是「一条完整栈」的最小示意，**但不要真的这样组织代码**。
+`Controller.step(state, dt)` 是整条栈的接口，如果每一层都去实现它，每层就被迫自成一条完整栈，
+拿不到上游的中间量（典型症状：`w_des` 这种「自己从不设置、只能被别人写」的字段）。
+
+参考 `cascade` 的做法：**只有最外层继承 `Controller`，内层各有自己的窄接口**。
+
+| 层 | 接口 | 状态 |
+|---|---|---|
+| 高度 | `AltitudeController.step(z, vz, dt) -> acc_z` | `int` |
+| 姿态 | `AttitudeController.step(R, f_des, yaw_des) -> w_des` | 无 |
+| 角速度 | `RateController.step(omega, w_des, dt) -> tau` | `int` |
+| 混控 | `MixerController.step(f, tau) -> omega_cmd` | 无（`saturated` 是输出） |
+| 串联 | `CascadeController.step(state, dt) -> omega_cmd` | 转发 |
+
+姿态层是**矢量式**（B 方案）：不命令姿态角，而是由期望推力矢量推出「为了产生这个推力需要什么姿态」。
+好处是 `cos θ` 补偿自动出现（`f = ‖m(a_des + G·e_z)‖`），且没有欧拉角奇异。
+
+好处是每个内层都能脱离 plant 单测（混控层的不变量是一条恒等式，见
+[`docs/altitude_loop.md`](./docs/altitude_loop.md) §6.8），而且依赖方向严格单向。
+
+文档见 [`docs/altitude_loop.md`](./docs/altitude_loop.md)。
+
 ---
 
 ## 机体参数（X3）
@@ -330,7 +354,8 @@ VERDICT: models agree
 ## 路线图
 
 - [x] 三层骨架 + 双后端 + 一致性验证
-- [ ] 级联 PID（位置 → 速度 → 姿态 → 角速率 → 混控）
+- [x] 分层控制器：高度 / 姿态（矢量式） / 角速度 / 混控（[docs](./docs/altitude_loop.md)）
+- [ ] 加速度 / 速度 / 位置环（`a_des[0:2]` 目前恒为 0，还没有航点跟踪）
 - [ ] 线性化模型导出：悬停点数值线性化，输出 `A`、`B`，并用 gz 有限差分校验
 - [ ] LQR：`scipy.linalg.solve_continuous_are`，离散化用 ZOH（`expm`）而不是前向欧拉
 - [ ] 差分平坦 + 外环 MPC + 内环 PID（约束走 QP：`A_alloc⁻¹·u ∈ [0, ω_max²]`）

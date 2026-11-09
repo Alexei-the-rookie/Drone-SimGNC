@@ -12,7 +12,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # .../src
 
-from quadfc.control.rate_alt import RateAltController
+from quadfc.control.altitude import AltitudeController
+from quadfc.control.cascade import CascadeController
 from quadfc.params import QuadParams
 from quadfc.plant.analytic import AnalyticPlant
 
@@ -28,9 +29,11 @@ class Run:
 
 def simulate(params, z0, ref, duration, rate, kp, kd):
     plant = AnalyticPlant(params, substep=1e-3, altitude=z0)
-    ctrl = RateAltController(params)
-    ctrl.kp_z = kp
-    ctrl.kd_z = kd
+    ctrl = CascadeController(params)
+    # Only the altitude layer carries tunable gains; the rate loop stays at its
+    # defaults so this tool keeps isolating the height channel.
+    ctrl.alt.kp = kp
+    ctrl.alt.kd = kd
     s = plant.reset()
     ctrl.reset(s)
 
@@ -40,10 +43,10 @@ def simulate(params, z0, ref, duration, rate, kp, kd):
     sat = np.empty(n, dtype=bool)
 
     for i in range(n):
-        ctrl.z_des = float(ref(s.t))  # update reference
+        ctrl.alt.z_des = float(ref(s.t))  # update reference
         u = np.asarray(ctrl.step(s, dt), dtype=float)  # compute control input
         c = np.clip(u, 0.0, params.omega_max)  # clip to max/min
-        sat[i] = ctrl.saturated  # set inside step(), before the internal _scale
+        sat[i] = ctrl.mix.saturated  # set inside step(), before the internal _scale
 
         t[i], z[i], vz[i] = s.t, s.position[2], s.velocity[2]
         thrust[i] = params.allocation[0] @ (c ** 2)  # compute thrust from motor speeds
@@ -102,8 +105,8 @@ def main(argv=None) -> int:
     ap.add_argument("--amplitude", type=float, default=0.05, help="正弦幅值 [m]")
     ap.add_argument("--freqs", default="0.05,0.08,0.10,0.13,0.16,0.20,0.30")
     ap.add_argument("--rate", type=float, default=100.0, help="控制频率 [Hz]")
-    ap.add_argument("--kp", type=float, default=None, help="临时覆盖 kp_z")
-    ap.add_argument("--kd", type=float, default=None, help="临时覆盖 kd_z")
+    ap.add_argument("--kp", type=float, default=None, help="临时覆盖高度环 kp")
+    ap.add_argument("--kd", type=float, default=None, help="临时覆盖高度环 kd")
     ap.add_argument("--csv", type=Path, default=None)
     ap.add_argument("--plot", action="store_true")
     args = ap.parse_args(argv)
@@ -112,14 +115,16 @@ def main(argv=None) -> int:
         raise SystemExit("--step must be non-zero")
 
     params = QuadParams.from_yaml(args.params)
-    kp = 1.0 if args.kp is None else args.kp
-    kd = 0.0 if args.kd is None else args.kd
+    # Defaults come from the controller so this tool cannot drift from it.
+    _alt = AltitudeController()
+    kp = _alt.kp if args.kp is None else args.kp
+    kd = _alt.kd if args.kd is None else args.kd
     thrust_max = 4.0 * params.kf * params.omega_max**2
 
     print(f"hover_omega = {params.hover_omega:7.1f} rad/s")
     print(f"thrust      = {params.weight:7.3f} N hover / {thrust_max:7.3f} N max "
           f"(+{(thrust_max - params.weight) / params.mass:.2f} / -9.81 m/s^2)")
-    print(f"altitude loop: kp_z={kp:g}  ki_z=0  kd_z={kd:g}")
+    print(f"altitude loop: kp={kp:g}  ki={_alt.ki:g}  kd={kd:g}")
 
     step_info = None
     if args.mode in ("step", "both"):

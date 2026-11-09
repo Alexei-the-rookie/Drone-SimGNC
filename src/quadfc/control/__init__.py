@@ -13,6 +13,7 @@ Each is a subclass of `Controller` and needs no change to the runner.
 """
 
 from quadfc.control.base import Controller
+from quadfc.control.cascade import CascadeController
 from quadfc.control.hover import HoverController
 
-__all__ = ["Controller", "HoverController"]
+__all__ = ["Controller", "CascadeController", "HoverController"]
