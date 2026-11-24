@@ -18,8 +18,10 @@
 
 ## 目录
 
+- [文档地图](#文档地图)
 - [为什么是这套架构](#为什么是这套架构)
 - [环境依赖](#环境依赖)
+- [在 Windows 上开发（无 Gazebo）](#在-windows-上开发无-gazebo)
 - [快速开始](#快速开始)
 - [数据流](#数据流)
 - [接口约定](#接口约定)
@@ -30,6 +32,17 @@
 - [已知的坑](#已知的坑)
 - [路线图](#路线图)
 - [许可与致谢](#许可与致谢)
+
+## 文档地图
+
+| 文档 | 讲什么 | 什么时候看 |
+|---|---|---|
+| 本 README | 架构切分、接口约定、机体参数、Gazebo 接口、已知的坑、路线图 | 第一次上手 |
+| [`docs/altitude_loop.md`](./docs/altitude_loop.md) | **内环**：高度 / 姿态（矢量式） / 角速度 / 混控。小信号模型、Routh 条件、增益整定、逐层实测、回归指纹 | 调内环、看姿态环推导 |
+| [`docs/velocity_position_loop.md`](./docs/velocity_position_loop.md) | **外环**：横向速度 / 位置。三阶内环模型、为什么不是 `1/kv`、权限限幅、逐项实测、Gazebo 交叉验证 | 加航点、调外环、看 `--target-*` 语义 |
+
+三份文档的分工是固定的：README 只讲「是什么、怎么用」，每份 `docs/` 讲「为什么这么写、怎么验证」。
+改任何一层的控制律之后，按对应文档末尾的**回归指纹**重跑。
 
 ---
 
@@ -73,6 +86,106 @@ sudo apt install python3-gz-transport13 python3-gz-msgs10
 ```bash
 pip install -r requirements.txt
 ```
+
+---
+
+## 在 Windows 上开发（无 Gazebo）
+
+先看清边界，再决定要不要折腾：
+
+| 能力 | Windows | 说明 |
+|---|---|---|
+| `analytic` 后端 | ✅ | 纯 numpy，无二进制依赖 |
+| 全部控制层（高度/姿态/角速度/混控/速度/位置） | ✅ | 只是 numpy |
+| 全部测试工具（`src/tools/test/*`） | ✅ | 同上 |
+| `--plot` / `--csv` | ✅ | matplotlib 强制 Agg 后端，不需要 GUI |
+| `gz` 后端 | ❌ | 见下 |
+| `tools/compare_backends.py` | ❌ | 需要 gz |
+
+**为什么 gz 在 Windows 上不行**：`quadfc/plant/gzsim.py` 依赖 `gz.transport13` 和 `gz.msgs10`，
+这两个是 Gazebo 的 C++ 库（gz-sim / gz-transport / gz-msgs）的 pybind 封装，只有 Ubuntu 的发行版包，
+没有 pip wheel；gz-sim 本身也不支持 Windows。
+
+所以 Windows 的定位是**控制律开发机**：analytic 后端 + 全部测试工具，正好覆盖两份文档里的
+全部带宽预算、整定表和实测记录。gz 只作为最后的交叉验证，在 Linux / WSL 上跑。
+
+### 一次性配置（PowerShell）
+
+```powershell
+git clone https://github.com/Alexei-the-rookie/Drone-SimGNC.git
+cd Drone-SimGNC
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+python -m pip install matplotlib        # 可选：--plot 用
+```
+
+- `py -3` 是 Windows 的 launcher；没有就用 `python`。**不要写 `python3`**——Windows 上通常没有这个命令。
+- 激活脚本被拦（`... 禁止运行脚本`）时：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。
+- 不用 venv 也行，但 numpy/PyYAML 建议装在 venv 里，和系统 Python 隔离。
+
+### 跑起来
+
+```powershell
+cd src
+
+# 悬停基线（必须 `cd src`，见下面第 1 条坑）
+python -m quadfc --backend analytic --controller cascade --altitude 2 --duration 5 --no-realtime
+
+# 航点：飞到 (2, 1)，同时升到 3 m
+python -m quadfc --backend analytic --controller cascade --altitude 2 `
+    --target-x 2 --target-y 1 --target-z 3 --duration 25 --no-realtime
+
+# 回归：外环（阶跃 + 扫频 + 出图）
+python tools\test\step_sine_vel_pos.py --mode both --loop cascade --plot
+
+# 回归：内环
+python tools\test\step_sine_att.py --mode all --plot
+python tools\test\step_sine_rate.py --mode both --plot
+```
+
+### 命令对照表
+
+| 文档里的写法（Linux） | Windows 写法 |
+|---|---|
+| `python3 -m quadfc ...` | `python -m quadfc ...` 或 `py -3 -m quadfc ...` |
+| `python3 tools/test/x.py --a 1` | `python tools\test\x.py --a 1`（`/` 也行，Python 认） |
+| `cd src && python3 ...` | PowerShell 5 用 `;`，PowerShell 7+ 才支持 `&&` |
+| `--csv /tmp/run.csv` | `--csv .\run.csv` 或 `--csv $env:TEMP\run.csv` |
+| `source /opt/ros/jazzy/setup.bash` | 不适用（没有 gz） |
+
+### 已知的 Windows 坑
+
+1. **必须在 `src/` 里运行。** `quadfc` 是 `src/` 下的包，没有打包成 wheel，所以
+   `python -m quadfc` 的工作目录必须是 `src`。在仓库根目录跑会得到 `No module named 'quadfc'`。
+2. **所有测试命令都加 `--no-realtime`。** Windows 的 `time.sleep` 粒度约 15 ms，实时模式会有抖动；
+   但那**只影响墙钟时间，不影响仿真数值**（循环按固定 `dt` 推进）。analytic 本来就比实时快一个数量级，
+   没必要等。
+3. **行尾符。** 仓库没有 `.gitattributes`，`core.autocrlf=true` 会把 `.yaml` / `.sdf` 变成 CRLF。
+   PyYAML 和 gz 都能读，但建议统一：`git config core.autocrlf input`。
+4. **控制台编码。** 源码里的中文只在注释和 `--help` 文本里；`print()` 里没有非 ASCII，所以
+   `>` 重定向到文件不会 `UnicodeEncodeError`。**以后别往 `print()` 里加 emoji**——那会在重定向时炸
+   （cp936/cp1252 编不出来）。文件读写已经全部钉死 UTF-8（`params.py`、`runner.py` 的 CSV）。
+5. **路径。** 代码里全用 `pathlib`，`--csv .\run.csv` 没问题；文档里的 `/tmp/...` 换成
+   `$env:TEMP` 或当前目录即可。
+6. **第一帧慢。** numpy 在 Windows 上首次 import 比 Linux 慢一点，`--duration 5` 的绝对耗时仍在秒级。
+
+### 如果一定要在 Windows 上跑 gz —— WSL2
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+WSL 里装 Gazebo Harmonic（`sudo apt install python3-gz-transport13 python3-gz-msgs10`）或
+ROS 2 Jazzy（`source /opt/ros/jazzy/setup.bash` 后 `import gz.transport13` 可用）。
+GUI 需要 WSLg（Windows 11 自带；Windows 10 要另装 X server），或者干脆用默认的 `-s` headless。
+
+两个建议：
+
+- **代码放在 WSL 的 `~/` 下，不要放 `/mnt/c`**——跨 9p 文件系统的 IO 会让 `pip install` 和
+  `import numpy` 慢一个数量级。
+- **分工**：Windows 上写控制律、跑 analytic 回归（快、无依赖）；WSL 里只做 gz 交叉验证。
 
 ---
 

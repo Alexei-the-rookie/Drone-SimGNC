@@ -69,7 +69,7 @@ class Log:
             header.append(f"clip{i}")
             cols.append(a["clipped"][:, i])
 
-        with path.open("w", newline="") as f:
+        with path.open("w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(header)
             w.writerows(np.column_stack(cols))

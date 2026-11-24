@@ -17,6 +17,20 @@
 
 ---
 
+## 目录
+
+- [1. 分层与范围](#1-分层与范围)
+- [2. 接口约定（要写的代码）](#2-接口约定要写的代码)
+- [3. 理论模型与增益整定](#3-理论模型与增益整定)
+- [4. 接入 `CascadeController` 与 CLI](#4-接入-cascadecontroller-与-cli)
+- [5. 测试工具](#5-测试工具)
+- [6. 实测记录（analytic、100 Hz、2026-11）](#6-实测记录analytic100-hz2026-11)
+- [7. 回归指纹](#7-回归指纹)
+- [8. 已知问题与 TODO](#8-已知问题与-todo)
+- [9. 复现命令](#9-复现命令)
+
+---
+
 ## 1. 分层与范围
 
 高度环是**标量**的（`z`），速度和位置环是**水平二维**的（`x`、`y`），这个不对称是刻意的：
@@ -371,6 +385,26 @@ rise 与幅值无关 → 这个环在 0.05～1.0 m/s 内是线性的，没有死
 | 3 | 0.430 | 0.427 | 0.780 | 0.750 | 0.10 % |
 | 4 | 0.290 | 0.291 | 0.870 | 0.849 | 4.61 % |
 
+### 6.6 Gazebo 交叉验证
+
+同一套增益（`kv=2` / `kp=0.5` / `tilt-max 30`）直接搬到 gz 后端（Harmonic 8.15，真实电机惯性 +
+桨叶阻力 + DART，`-s` 无 GUI），不改一行代码：
+
+| 工况 | analytic | gz | 差 |
+|---|---|---|---|
+| 悬停 5 s，`--altitude 2` | `[0.000 0.000 2.000]`，`sat` 0 % | `[0.000 0.000 2.004]`，`sat` 0 % | z 4 mm |
+| 航点 (1, 0.5)，25 s | `[1.000 0.500 2.000]`，峰值倾角 **5.99°**，`sat` 0 % | `[1.000 0.500 2.004]`，峰值倾角 **5.97°**，`sat` 0 % | 倾角 0.02° |
+
+两件事值得记：
+
+1. **峰值倾角差 0.02°**，说明 §3 的三阶理论（用 `τ_up` 建的内环模型）在 gz 上同样成立——
+   外环的两个增益不需要为 gz 重新整定。
+2. **那 4 mm 不是控制误差。** `GzPlant.reset()` 的收敛判据是 `|z − altitude| < 0.05`，所以起点本身就
+   允许几毫米偏差，而 `altitude_error` 是相对目标算的。想消掉就把那个 5 cm 阈值收紧（代价是 reset 慢一点）。
+
+> 工具的 `--loop vel|pos|cascade` 只接 `AnalyticPlant`，所以 gz 只能用 CLI 的端到端数字核对（§9）。
+> 在 gz 上重跑工具需要给 `simulate()` 加一个 plant 工厂，属 TODO。
+
 ---
 
 ## 7. 回归指纹
@@ -429,7 +463,7 @@ python3 -m quadfc --backend analytic --controller cascade --altitude 2 \
 | 1 | 两个环都只有 P | `analytic` 后端无阻力，所以没有静差；换到有阻力的模型或真机会有 | 加 `ki` 前先做抗饱和，复用 `mix.saturated` |
 | 2 | 没有前馈（`z̈_des`、`v̇_des`） | 正弦跟踪有相位滞后（0.2 Hz 已 35°） | 位置环输出 `v_des` 时顺带算 `v̇_des`，加到 `a_xy` |
 | 3 | `p_des` 是**阶跃**输入 | 3 m 阶跃峰值倾角 15.6°，8 m 就会撞 30° 限幅 | 需要航点跟踪时换成带速度规划的参考（S 曲线 / 最小 snap） |
-| 4 | 只在 `analytic` 后端验证过 | `gz` 后端有真实电机惯性，`kv` 可能偏快 | 按 §5 的 `cascade` 模式在 gz 上重跑一次，标准放宽到 ±25 % |
+| 4 | ~~只在 `analytic` 后端验证过~~ | 已在 gz 8.15 上交叉验证（§6.6）：航点峰值倾角 5.97° vs 5.99°，增益无需重调 | 工具仍只支持 analytic；给 `simulate()` 加 plant 工厂后才能自动化 |
 | 5 | 横向限幅固定 30° | 大机动时推力余量没有被利用 | 需要时按当前 `acc_z` 动态算 `a_max`，而不是常数 |
 | 6 | 位置环 `kp` 上限（`1/τ_i ≈ 8`）只是 Routh 必要条件 | 过了这个值会先出现振荡，不会立刻发散 | 不要把 Routh 条件当设计上限，用 §1.1 的带宽预算 |
 | 7 | 没有 yaw 规划 | `yaw_des` 保持起飞时的朝向 | 需要「机头朝速度方向」时，在 `p_des` 变化时更新 `yaw_des` |
@@ -437,6 +471,9 @@ python3 -m quadfc --backend analytic --controller cascade --altitude 2 \
 ---
 
 ## 9. 复现命令
+
+> Windows 上这些命令都能跑（`analytic` 后端），把 `python3` 换成 `python` 即可；
+> Windows 写法与坑见 README 的「在 Windows 上开发」一节。gz 那几条只能在 Linux / WSL 上跑。
 
 ```bash
 cd /home/nuaawzh/detect_design/src
@@ -463,7 +500,13 @@ python3 tools/test/step_sine_vel_pos.py --loop pos --kp 1.0
 # 集成测试（CascadeController）
 python3 tools/test/step_sine_vel_pos.py --loop cascade --mode step
 
-# 命令行端到端（实现 --target-* 之后）
+# 命令行端到端
 python3 -m quadfc --backend analytic --controller cascade \
     --altitude 2 --target-x 2 --target-y 1 --duration 15 --no-realtime
+
+# Gazebo（真实物理，实时跑；首次启动约 20 s）
+python3 -m quadfc --backend gz --controller cascade --altitude 2 --duration 5 --quiet
+python3 -m quadfc --backend gz --controller cascade --altitude 2 \
+    --target-x 1 --target-y 0.5 --duration 25 --quiet
+python3 -m quadfc --backend gz --controller cascade --altitude 2 --duration 8 --gui
 ```
