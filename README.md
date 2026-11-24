@@ -95,6 +95,13 @@ python3 -m quadfc --backend analytic --duration 5 --altitude 2 \
 
 # 4) 验证两个后端一致
 python3 tools/compare_backends.py --duration 1.2 --altitude 1.0
+
+# 5) 横向位置环：阶跃 + 扫频（规格与实测见 docs/velocity_position_loop.md）
+python3 tools/test/step_sine_vel_pos.py --loop pos --mode both --plot
+
+# 6) 航点：飞到 (2, 1)，同时升到 3 m
+python3 -m quadfc --backend analytic --controller cascade --altitude 2 \
+    --target-x 2 --target-y 1 --target-z 3 --duration 25 --no-realtime
 ```
 
 常用参数：
@@ -106,6 +113,9 @@ python3 tools/compare_backends.py --duration 1.2 --altitude 1.0
 | `--duration` | 5.0 | 仿真时长 |
 | `--rate` | 100 | 控制环频率 Hz |
 | `--altitude` | 0 | 起始高度（`gz` 后端会 teleport 到该高度） |
+| `--target-x` / `--target-y` | 无 | 水平目标 [m]；不给就原地悬停（`cascade` 才有） |
+| `--target-z` | 无 | 高度目标 [m]；不给就用当前高度 |
+| `--tilt-max` | 30 | 横向加速度限幅对应的最大倾角 [deg] |
 | `--hover-scale` | 1.0 | 悬停油门倍率，>1 会缓慢爬升 |
 | `--attach` | — | 接一个已经在跑的 `gz sim`，不自己起 |
 | `--gui` | — | 开 Gazebo 图形界面 |
@@ -244,6 +254,8 @@ class CascadePID(Controller):
 
 | 层 | 接口 | 状态 |
 |---|---|---|
+| 位置 | `PositionController.step(p, p_des, dt) -> v_des` | 无（水平二维，见 [外环文档](./docs/velocity_position_loop.md)） |
+| 速度 | `VelocityController.step(v, v_des, dt) -> a_xy` | 无（水平二维） |
 | 高度 | `AltitudeController.step(z, vz, dt) -> acc_z` | `int` |
 | 姿态 | `AttitudeController.step(R, f_des, yaw_des) -> w_des` | 无 |
 | 角速度 | `RateController.step(omega, w_des, dt) -> tau` | `int` |
@@ -256,7 +268,8 @@ class CascadePID(Controller):
 好处是每个内层都能脱离 plant 单测（混控层的不变量是一条恒等式，见
 [`docs/altitude_loop.md`](./docs/altitude_loop.md) §6.8），而且依赖方向严格单向。
 
-文档见 [`docs/altitude_loop.md`](./docs/altitude_loop.md)。
+文档见 [`docs/altitude_loop.md`](./docs/altitude_loop.md)（内环）和
+[`docs/velocity_position_loop.md`](./docs/velocity_position_loop.md)（横向外环）。
 
 ---
 
@@ -355,7 +368,7 @@ VERDICT: models agree
 
 - [x] 三层骨架 + 双后端 + 一致性验证
 - [x] 分层控制器：高度 / 姿态（矢量式） / 角速度 / 混控（[docs](./docs/altitude_loop.md)）
-- [ ] 加速度 / 速度 / 位置环（`a_des[0:2]` 目前恒为 0，还没有航点跟踪）
+- [x] 速度 / 位置环（[docs](./docs/velocity_position_loop.md)：`kv=2` / `kp=0.5`，1 m 阶跃 rise 3.24 s、无超调）
 - [ ] 线性化模型导出：悬停点数值线性化，输出 `A`、`B`，并用 gz 有限差分校验
 - [ ] LQR：`scipy.linalg.solve_continuous_are`，离散化用 ZOH（`expm`）而不是前向欧拉
 - [ ] 差分平坦 + 外环 MPC + 内环 PID（约束走 QP：`A_alloc⁻¹·u ∈ [0, ω_max²]`）

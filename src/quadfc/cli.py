@@ -26,7 +26,7 @@ def build_controller(name: str, params: QuadParams, args) -> Controller:
     if name == "hover":
         return HoverController(params, scale=args.hover_scale)
     if name == "cascade":
-        return CascadeController(params)
+        return CascadeController(params, tilt_max=args.tilt_max)
     raise SystemExit(f"unknown controller '{name}'")
 
 
@@ -39,6 +39,33 @@ def build_plant(backend: str, params: QuadParams, args) -> Plant:
         return GzPlant(params, args.world, spawn=not args.attach, gui=args.gui,
                        altitude=args.altitude if args.altitude > 0 else None)
     raise SystemExit(f"unknown backend '{backend}'")
+
+
+def apply_target(controller: Controller, args) -> None:
+    """Write --target-* into the controller before the loop starts.
+
+    Both backends reset to x = y = 0, so an omitted horizontal component means
+    "stay where you are".  `p_des` and `z_des` use None as a sentinel, so values
+    set here survive `controller.reset(state)` inside `run()`.
+    """
+    if args.target_x is not None or args.target_y is not None:
+        if not hasattr(controller, "p_des"):
+            raise SystemExit(
+                f"--target-x/--target-y need a position-tracking controller "
+                f"(current: '{controller.name}'); try --controller cascade"
+            )
+        controller.p_des = np.array([
+            0.0 if args.target_x is None else args.target_x,
+            0.0 if args.target_y is None else args.target_y,
+        ])
+
+    if args.target_z is not None:
+        if not hasattr(controller, "alt"):
+            raise SystemExit(
+                f"--target-z needs a controller with an altitude loop "
+                f"(current: '{controller.name}'); try --controller cascade"
+            )
+        controller.alt.z_des = args.target_z
 
 
 def plot_log(log: Log, path: Path | None) -> None:
@@ -88,6 +115,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--duration", type=float, default=5.0)
     p.add_argument("--rate", type=float, default=100.0, help="control loop rate [Hz]")
     p.add_argument("--altitude", type=float, default=0.0, help="initial z (analytic backend)")
+    p.add_argument("--target-x", type=float, default=None,
+                   help="horizontal target x [m] (needs --controller cascade)")
+    p.add_argument("--target-y", type=float, default=None, help="horizontal target y [m]")
+    p.add_argument("--target-z", type=float, default=None, help="altitude target [m]")
+    p.add_argument("--tilt-max", type=float, default=30.0,
+                   help="lateral acceleration limit as a tilt angle [deg]")
     p.add_argument("--substep", type=float, default=1e-3, help="analytic integration step [s]")
     p.add_argument("--hover-scale", type=float, default=1.0, help="hover throttle multiplier")
     p.add_argument("--attach", action="store_true", help="use an already running gz sim")
@@ -101,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     params = QuadParams.from_yaml(args.params)
     plant = build_plant(args.backend, params, args)
     controller = build_controller(args.controller, params, args)
+    apply_target(controller, args)
 
     print(
         f"{params.name}: mass={params.mass:.3f} kg  "
@@ -110,6 +144,13 @@ def main(argv: list[str] | None = None) -> int:
         f"backend={args.backend}  controller={controller.name}  "
         f"rate={args.rate:.0f} Hz  duration={args.duration:g}s"
     )
+    if args.target_x is not None or args.target_y is not None or args.target_z is not None:
+        parts = []
+        if args.target_x is not None or args.target_y is not None:
+            parts.append(f"x/y=[{controller.p_des[0]:.3f} {controller.p_des[1]:.3f}] m")
+        if args.target_z is not None:
+            parts.append(f"z={args.target_z:.3f} m")
+        print("target  = " + "  ".join(parts))
 
     try:
         with plant:
@@ -120,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.rate,
                 realtime=not args.no_realtime,
                 verbose=not args.quiet,
+                z_target=args.target_z,
             )
     except RuntimeError as exc:
         print(f"\nerror: {exc}", file=sys.stderr)

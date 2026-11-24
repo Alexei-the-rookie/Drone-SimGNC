@@ -358,13 +358,14 @@ self.yaw_des = 0.0                  # 无条件归零（见下）
 
 ### 6.1 工具
 
-三个工具，**每个只串它声明要测的那几层**：
+四个工具，**每个只串它声明要测的那几层**：
 
 | 工具 | 被测对象 | 隔离手法 |
 |---|---|---|
 | `step_sine_rate_alt.py` | 高度通道（走 `CascadeController`） | 只覆盖 `alt.kp/kd`，其余层保持默认 |
 | `step_sine_att.py` | `AttitudeController` + rate + mixer | 手动串三层，高度环静音（`a_des[2]=0`） |
 | `step_sine_rate.py` | `RateController` + `MixerController` | 手动串两层，`f ≡ m·G` |
+| `step_sine_vel_pos.py` | 横向速度环 / 位置环 | 手动串 pos→vel→att→rate→mixer，位置环可旁路（见 [velocity_position_loop.md](./velocity_position_loop.md)） |
 
 后两个刻意**不**用 cascade：它们声明的是「测姿态」和「测角速度」，把高度层拖进来只会让测试对象和被声明的不一致。
 
@@ -751,8 +752,8 @@ def test_bode_matches_second_order(params):
 | # | 问题 | 影响 | 建议 |
 |---|---|---|---|
 | 1 | ~~控制器内部完成 `_scale` + `clip`，破坏 `base.py` 的约定~~ | 已修：`MixerController` 在 `_scale` **之前**记录 `saturated`，三个测试工具读 `mix.saturated` | — |
-| 2 | ~~`reset()` 无条件覆盖 `z_des`~~ | 已修：`AltitudeController.z_des` 用 `None` 作哨兵。**但 CLI 仍没暴露「目标高度」参数**，所以命令行行为还是原地悬停 | 加 `--target-z`，在 `cascade.alt.z_des` 上设值 |
-| 3 | ~~`w_des` 恒为 0~~ | 已修：姿态层（矢量式）已接入，`w_des = −kp·e_R`。倾斜恢复见 §6.7 | **水平方向仍未闭环**：`a_des[0:2]` 恒为 0，加速度环后才有航点跟踪 |
+| 2 | ~~`reset()` 无条件覆盖 `z_des`~~ | 已修：`AltitudeController.z_des` 用 `None` 作哨兵，CLI 的 `--target-z` 在 `reset()` 之前写入也不会被冲掉 | — |
+| 3 | ~~`w_des` 恒为 0~~ | 已修：姿态层（矢量式）已接入，`w_des = −kp·e_R`。倾斜恢复见 §6.7。水平方向由速度/位置环闭环，见 [velocity_position_loop.md](./velocity_position_loop.md) | — |
 | 4 | `RateController.kp` 写死，`I = np.diag(params.inertia)` 未使用 | 换机型即失效；且三轴 `kp/I` 不相等（yaw 只有 5.1 rad/s，见 §6.6） | `self.kp = np.diag(params.inertia) * wc`；注意 yaw 权限只有 0.112 N·m |
 | 5 | `ki` 可开但无抗饱和 | 饱和期间积分累积，恢复后过冲 | 条件积分或 back-calculation，可复用 `mix.saturated` |
 | 6 | 无 `z̈_des` 前馈 | 正弦/轨迹跟踪存在相位滞后（0.16 Hz 已 65°） | `acc_z += z_des_ddot` |
@@ -816,6 +817,11 @@ python3 tools/test/step_sine_att.py --mode step --axis roll
 
 # 姿态环联调（高度环同时工作 -> 看真实饱和）
 python3 tools/test/step_sine_att.py --mode step --step 2.0 --with-altitude
+
+# 横向速度环 / 位置环（规格见 velocity_position_loop.md）
+python3 tools/test/step_sine_vel_pos.py --loop vel --mode both --plot
+python3 tools/test/step_sine_vel_pos.py --loop pos --mode both --plot
+python3 tools/test/step_sine_vel_pos.py --loop pos --axis y --with-altitude
 
 # Gazebo
 python3 -m quadfc --backend gz --controller cascade --altitude 2 --duration 8 --gui
@@ -898,7 +904,9 @@ yaw（内环 `ζ=1.99`，级联后主极点阻尼比只有 ~0.55，**怎么调 K
 
 ### 9.5 下一步：加速度 / 速度 / 位置环
 
-姿态层打通之后，接缝已经现成——**只要往 `a_des[0:2]` 写东西**：
+速度环与位置环的规格、理论模型和实测已经独立成篇：
+[velocity_position_loop.md](./velocity_position_loop.md)。接缝就是下面这个 `a_des[0:2]`，
+三条设计约束在那里被量化（§1.1 带宽预算、§3.4 权限限幅）。
 
 ```
 位置环:  p_des -> v_des            (最外层)

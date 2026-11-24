@@ -107,11 +107,16 @@ def run(
     realtime: bool = True,
     log: Log | None = None,
     verbose: bool = True,
+    z_target: float | None = None,
 ) -> tuple[Log, Report]:
     """Run one closed-loop episode.
 
     `realtime=False` only makes sense for the analytic plant; the gz plant is
     paced by the simulator regardless.
+
+    `z_target` only changes how the report is worded: with a target, the
+    altitude error is measured against it, otherwise against the start altitude
+    (which keeps the old hover runs bit-for-bit identical).
     """
     log = log if log is not None else Log()
     dt = 1.0 / rate
@@ -154,7 +159,8 @@ def run(
         steps=steps,
         duration=t,
         final_position=state.position.copy(),
-        altitude_error=state.position[2] - start_pos[2],
+        altitude_error=state.position[2]
+        - (start_pos[2] if z_target is None else z_target),
         max_tilt_deg=max_tilt,
         saturation_fraction=n_saturated / max(steps, 1),
         wall_time=time.time() - start_wall,
