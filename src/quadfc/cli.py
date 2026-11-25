@@ -36,8 +36,15 @@ def build_plant(backend: str, params: QuadParams, args) -> Plant:
     if backend == "gz":
         from quadfc.plant.gzsim import GzPlant
 
-        return GzPlant(params, args.world, spawn=not args.attach, gui=args.gui,
-                       altitude=args.altitude if args.altitude > 0 else None)
+        return GzPlant(
+            params,
+            args.world,
+            spawn=not args.attach,
+            gui=args.gui,
+            model_name=args.model_name,
+            world_name=args.world_name,
+            altitude=args.altitude if args.altitude > 0 else None,
+        )
     raise SystemExit(f"unknown backend '{backend}'")
 
 
@@ -124,6 +131,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--substep", type=float, default=1e-3, help="analytic integration step [s]")
     p.add_argument("--hover-scale", type=float, default=1.0, help="hover throttle multiplier")
     p.add_argument("--attach", action="store_true", help="use an already running gz sim")
+    p.add_argument("--world-name", default=None,
+                   help="gz world name (default: parsed from the SDF; required with --attach)")
+    p.add_argument("--model-name", default="x3",
+                   help="gz model name; also picks /model/<name>/odometry")
     p.add_argument("--gui", action="store_true", help="open the gz GUI")
     p.add_argument("--no-realtime", action="store_true", help="run analytic backend flat out")
     p.add_argument("--csv", type=Path, default=None)
@@ -132,7 +143,11 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     params = QuadParams.from_yaml(args.params)
-    plant = build_plant(args.backend, params, args)
+    try:
+        plant = build_plant(args.backend, params, args)
+    except RuntimeError as exc:
+        print(f"\nerror: {exc}", file=sys.stderr)
+        return 1
     controller = build_controller(args.controller, params, args)
     apply_target(controller, args)
 

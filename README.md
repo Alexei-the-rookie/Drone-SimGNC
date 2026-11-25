@@ -230,6 +230,9 @@ python3 -m quadfc --backend analytic --controller cascade --altitude 2 \
 | `--target-z` | 无 | 高度目标 [m]；不给就用当前高度 |
 | `--tilt-max` | 30 | 横向加速度限幅对应的最大倾角 [deg] |
 | `--hover-scale` | 1.0 | 悬停油门倍率，>1 会缓慢爬升 |
+| `--world` | `worlds/x3_quadcopter.sdf` | 选 world 文件（world 名从里面解析） |
+| `--world-name` | 解析 SDF | 覆盖 world 名；`--attach` 且文件读不到时必需 |
+| `--model-name` | `x3` | 覆盖模型名，同时决定 `/model/<name>/odometry` |
 | `--attach` | — | 接一个已经在跑的 `gz sim`，不自己起 |
 | `--gui` | — | 开 Gazebo 图形界面 |
 | `--no-realtime` | — | `analytic` 后端全速跑，不等实时 |
@@ -426,6 +429,34 @@ class CascadePID(Controller):
 
 `twist` 在**机体系**，转到世界系需要 `R(q) @ twist.linear`（已用「数值微分位姿」对照核实过）；`twist.angular` 本身就在机体系，直接用。
 
+**这三个名字全部从 SDF 里推导，不写死**（`read_world_info()`）：world 名来自 `<world name=...>`，
+电机话题来自 `<robotNamespace>` + `<commandSubTopic>`，odom 话题来自 model 名。
+换 world 时顺序是：
+
+```bash
+python3 -m quadfc --backend gz --world ../worlds/warehouse.sdf --duration 5   # 名字自动解析
+python3 -m quadfc --backend gz --world ../worlds/warehouse.sdf --world-name warehouse \
+    --model-name myuav                                                          # 显式覆盖
+```
+
+`--world-name` 在 `--attach` 且文件读不到时是**必需**的（没有文件可解析）。
+名字对不上现在会**直接报错**，不再静默飞在错误的世界里（第 7 条坑）。
+
+### 换环境：三条已验证的做法
+
+| 做法 | 命令 | 适用 |
+|---|---|---|
+| 静态障碍写进 SDF | `<model name="pillar_0"><static>true</static>…` | 固定场景、可复现、CI 友好 |
+| 运行时注入 | `gz service -s /world/<w>/create/blocking --reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean --req 'sdf: "<模型 SDF 压成一行>"'` | 随机化场景，不重启仿真 |
+| 动态障碍 | `gz service -s /world/<w>/set_pose --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --req 'name: "obstacle_0", position: {x: 2, y: 1.5, z: 1.5}'` | 移动障碍；更高频可用 `gz-sim-python-system-loader` 在 `PreUpdate` 里改位姿 |
+
+注意 `create/blocking` 的 `--req` 里 SDF **必须整体加双引号**（SDF 内部用单引号），否则
+protobuf 的 text-format 解析会失败，报 `Expected string, got: <`。本地模型放 `src/worlds/models/` 并
+`export GZ_SIM_RESOURCE_PATH=$PWD/worlds/models`，就能 `<include><uri>model://<name></uri>`。
+
+> 并行跑多个仿真实例时用 `GZ_PARTITION=run$i` 隔离，否则多个 `gz sim` 会共用同一个 transport 分区、
+> 互相收到对方的 odometry。
+
 ---
 
 ## 双后端一致性验证
@@ -474,6 +505,11 @@ VERDICT: models agree
 5. **单位陷阱**：这里 kf 是 `N/(rad/s)²`。`gym-pybullet-drones` 那类用 `N/rpm²`，
    同一个物理量数值差约 **300 倍**，抄参数必炸。
 6. **`analytic` 后端没有地面。** 高度降到 0 以下它不会停。需要地面接触时用 `gz` 后端。
+7. **world 名 / model 名对不上时，服务调用会「成功但无效」。** `set_pose` 是按
+   `/world/<world 名>/set_pose` 寻址的，名字写错时 transport 层只返回 `False`；模型名写错时服务
+   还会返回 `True`，但飞机一动不动——两种都会表现为「起飞高度没生效」。
+   现在两个都改成抛 `RuntimeError` 并指出是哪个名字错了（`GzPlant.reset()`），
+   因为这类错误只看 log 永远查不出来。
 
 ---
 

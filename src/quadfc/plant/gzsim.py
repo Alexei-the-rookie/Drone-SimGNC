@@ -16,6 +16,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,37 @@ from quadfc.plant.base import Plant
 from quadfc.state import State
 
 
+def read_world_info(path: str | Path) -> tuple[str | None, str | None, str | None]:
+    """Pull the names a world file dictates, so nothing has to be hardcoded.
+
+    Returns ``(world_name, robot_namespace, command_subtopic)``.  The world name
+    is what the ``/world/<name>/set_pose`` service is keyed on; the other two
+    compose the motor-speed command topic.  Any field that cannot be found
+    comes back as ``None`` and the caller falls back to a default.
+
+    A missing or malformed file is not an error here -- `--attach` runs without
+    one -- so the caller decides whether that is fatal.
+    """
+    try:
+        root = ET.parse(str(path)).getroot()
+    except (OSError, ET.ParseError):
+        return None, None, None
+
+    world = root.find(".//world")
+    world_name = world.get("name") if world is not None else None
+
+    def _text(*tags):
+        for tag in tags:
+            el = root.find(f".//{tag}")
+            if el is not None and el.text and el.text.strip():
+                return el.text.strip()
+        return None
+
+    return world_name, _text("robotNamespace", "robot_namespace"), _text(
+        "commandSubTopic", "command_sub_topic"
+    )
+
+
 class GzPlant(Plant):
     def __init__(
         self,
@@ -37,10 +69,10 @@ class GzPlant(Plant):
         *,
         spawn: bool = True,
         gui: bool = False,
-        motor_topic: str = "/X3/gazebo/command/motor_speed",
-        odom_topic: str = "/model/x3/odometry",
+        motor_topic: str | None = None,
+        odom_topic: str | None = None,
         model_name: str = "x3",
-        world_name: str = "quadcopter",
+        world_name: str | None = None,
         altitude: float | None = None,
         startup_timeout: float = 90.0,
     ):
@@ -48,10 +80,32 @@ class GzPlant(Plant):
         self.world = Path(world)
         self.spawn = spawn
         self.gui = gui
-        self.motor_topic = motor_topic
-        self.odom_topic = odom_topic
         self.model_name = model_name
+
+        # Everything below is derived from the world file unless overridden, so
+        # pointing --world at a new SDF does not silently keep talking to the
+        # old world's services and topics.
+        file_world, robot_ns, command_sub = read_world_info(self.world)
+        if world_name is None:
+            world_name = file_world
+            if world_name is None and spawn:
+                raise RuntimeError(
+                    f"cannot find a <world name=...> in {self.world}; pass "
+                    f"world_name explicitly or check the file"
+                )
+            if world_name is None:
+                raise RuntimeError(
+                    "world_name is required when spawning is disabled "
+                    "(the world file cannot be read to derive it)"
+                )
         self.world_name = world_name
+
+        self.motor_topic = motor_topic or (
+            f"/{robot_ns}/{command_sub}"
+            if robot_ns and command_sub
+            else "/X3/gazebo/command/motor_speed"
+        )
+        self.odom_topic = odom_topic or f"/model/{self.model_name}/odometry"
         self.altitude = altitude
         self.startup_timeout = startup_timeout
 
@@ -157,7 +211,14 @@ class GzPlant(Plant):
         for _ in range(20):
             self.step(hover, 0.01)
 
-        self.set_pose((0.0, 0.0, self.altitude))
+        if not self.set_pose((0.0, 0.0, self.altitude)):
+            raise RuntimeError(
+                f"teleport via /world/{self.world_name}/set_pose failed.\n"
+                f"The service is keyed on the world name, so a mismatch with "
+                f"the SDF's <world name=...> fails silently at the transport "
+                f"level. Pass world_name/--world-name explicitly if the file "
+                f"does not contain it."
+            )
         # The first odometry sample after a teleport reports a bogus velocity
         # (it differentiates the jump), so throw it away.
         for _ in range(3):
@@ -167,7 +228,19 @@ class GzPlant(Plant):
         while time.monotonic() < deadline:
             s = self.step(hover, 0.01)
             if abs(s.position[2] - self.altitude) < 0.05:
-                break
+                return s
+
+        # A service can answer True and still do nothing when the *model* name
+        # is wrong, so check that the aircraft actually moved. A whole metre of
+        # error cannot be "still settling", it means the teleport never landed.
+        if abs(s.position[2] - self.altitude) > 0.5:
+            raise RuntimeError(
+                f"model '{self.model_name}' did not move to z={self.altitude} "
+                f"(z={s.position[2]:.3f} after 2 s).\n"
+                f"Check that the world spawns a model named "
+                f"'{self.model_name}' (--model-name), and that the world name "
+                f"'{self.world_name}' matches the SDF."
+            )
         return s
 
     def set_pose(self, position, rpy=(0.0, 0.0, 0.0)) -> bool:
